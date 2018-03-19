@@ -1,0 +1,11 @@
+[development]
+database_url="mysql://test:test@localhost/pushbox"
+fxa_host="oauth.stage.mozaws.net"
+dryrun=true
+
+[staging]
+
+[production]
+
+[global.limits]
+json = 1048576

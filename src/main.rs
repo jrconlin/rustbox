@@ -1,20 +1,29 @@
-#![feature(plugin, decl_macro)]
+#![feature(plugin, decl_macro, custom_derive, duration_extras)]
 #![plugin(rocket_codegen)]
 
+#[macro_use]
+extern crate diesel;
+#[macro_use]
+extern crate failure;
+#[macro_use]
+extern crate serde_derive;
+#[macro_use]
+extern crate serde_json;
+
+extern crate diesel_migrations;
+extern crate mysql;
+extern crate rand;
+extern crate reqwest;
 extern crate rocket;
-#[macro_use] extern crate rocket_contrib;
-#[macro_use] extern crate serde_json;
-#[macro_use] extern crate serde_derive;
-#[macro_use] extern crate mysql;
+extern crate rocket_contrib;
+extern crate serde;
 
-use rocket_contrib::{Json, JsonValue};
-use rocket::State;
-use std::collections::HashMap;
-// Add database
-
-mod store;
+mod auth;
+mod db;
+mod error;
+mod server;
 
 fn main() {
-    println!("Hello, world!");
+    let rocket_serv = server::Server::start(rocket::ignite());
+    rocket_serv.unwrap().launch();
 }
-
