@@ -1,3 +1,5 @@
+# Remember to run `cargo update` to ensure that versions are updated.
+# `cargo clean` does not change the Cargo.lock file.
 [package]
 name = "rustbox"
 version = "0.1.0"

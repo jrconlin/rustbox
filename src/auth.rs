@@ -8,12 +8,15 @@ use rocket::request::{self, FromRequest};
 use rocket::{Request, State};
 
 use error::{HandlerError, HandlerErrorKind, VALIDATION_FAILED};
-use server::RustboxConfig;
 
-const FXA_IDENT_ROOT: &str = "https://identity.mozilla.com/apps/pushbox/";
+use config::ServerConfig;
+
+pub const FXA_IDENT_ROOT: &str = "https://identity.mozilla.com/apps/pushbox/";
 
 #[derive(Debug)]
-pub struct FxAAuthenticator {}
+pub struct FxAAuthenticator {
+    pub scope: Vec<String>
+}
 
 #[derive(Clone, Deserialize, Debug)]
 pub struct FxAResp {
@@ -26,31 +29,17 @@ impl<'a, 'r> FromRequest<'a, 'r> for FxAAuthenticator {
     type Error = HandlerError;
 
     fn from_request(request: &'a Request<'r>) -> request::Outcome<Self, HandlerError> {
+        let mut scopes = Vec::new();
         if let Some(auth_header) = request.headers().get_one("Authorization") {
             let method = request.method();
 
             // Get a copy of the rocket config from the request's managed memory.
             // There is no other way to get the rocket.config() from inside a request
             // handler.
-            let config = request.guard::<State<RustboxConfig>>().unwrap();
+            let config = request.guard::<State<ServerConfig>>().unwrap();
             let fxa_host = config.fxa_host.clone();
             // segments = ["v1", "store", service, uid, devid ]
-            if request.uri().segments().count() < 4 {
-                return Failure((
-                    VALIDATION_FAILED,
-                    HandlerErrorKind::Unauthorized(format!(
-                        "Invalid URI {} segments",
-                        request.uri().segments().count()
-                    )).into(),
-                ));
-            }
-            // call unwrap here because we already checked for instances.
-            let service = request.uri().segments().nth(2).unwrap().to_owned();
-            if config.services.contains(&service) == false {
-                return Failure((VALIDATION_FAILED, HandlerErrorKind::NotFound.into()));
-            }
-            let device_id = request.uri().segments().nth(4).unwrap_or("").to_owned();
-
+            println!("### Request: {:?}", request.uri());
             let mut splitter = auth_header.splitn(2, " ");
             match splitter.next() {
                 Some(schema) => if schema.to_lowercase() != "bearer".to_owned() {
@@ -112,9 +101,9 @@ impl<'a, 'r> FromRequest<'a, 'r> for FxAAuthenticator {
                         .test_data
                         .get("fxa_response")
                         .expect("Could not parse test fxa_response");
-                    let mut scopes: Vec<String> = Vec::new();
+                    let mut fscopes: Vec<String> = Vec::new();
                     for scope in data["scope"].as_array().expect("Invalid scope array") {
-                        scopes.push(
+                        fscopes.push(
                             scope
                                 .as_str()
                                 .expect("Missing valid scope for test")
@@ -130,8 +119,9 @@ impl<'a, 'r> FromRequest<'a, 'r> for FxAAuthenticator {
                             .as_str()
                             .expect("Missing client_id for test")
                             .to_string(),
-                        scope: scopes,
+                        scope: fscopes,
                     };
+
                 } else {
                     // get the FxA Validiator response.
                     let mut raw_resp = match client.post(&fxa_url).json(&body).send() {
@@ -168,37 +158,11 @@ impl<'a, 'r> FromRequest<'a, 'r> for FxAAuthenticator {
                         }
                     };
                 }
-                // Check if everything is allowed.
-                if resp.scope.contains(&FXA_IDENT_ROOT.to_string()) {
-                    return Success(FxAAuthenticator {});
-                }
-                // Otherwise check for explicit allowances
-                match method {
-                    Method::Put | Method::Post | Method::Delete => {
-                        if resp.scope
-                            .contains(&format!("{}send/{}", FXA_IDENT_ROOT, device_id))
-                            || resp.scope.contains(&format!("{}send", FXA_IDENT_ROOT))
-                        {
-                            return Success(FxAAuthenticator {});
-                        }
-                    }
-                    Method::Get => {
-                        if resp.scope
-                            .contains(&format!("{}recv/{}", FXA_IDENT_ROOT, device_id))
-                            || resp.scope.contains(&format!("{}recv", FXA_IDENT_ROOT))
-                        {
-                            return Success(FxAAuthenticator {});
-                        }
-                    }
-                    _ => {}
-                }
-                return Failure((
-                    VALIDATION_FAILED,
-                    HandlerErrorKind::Unauthorized("Access Token Unauthorized".to_string()).into(),
-                ));
-            }
-            // Succeed for "dry runs"
-            return Success(FxAAuthenticator {});
+                scopes = resp.scope.clone();
+            };
+            return Success(FxAAuthenticator {
+                scope: scopes
+            });
         } else {
             // No Authorization header
             return Failure((
@@ -212,14 +176,65 @@ impl<'a, 'r> FromRequest<'a, 'r> for FxAAuthenticator {
 #[cfg(test)]
 mod test {
     // cargo test -- --no-capture
-    use std::env;
 
     use rocket;
     use rocket::config::{Config, Environment, RocketConfig, Table};
+    use rocket::fairing::AdHoc;
     use rocket::http::Header;
     use rocket::local::Client;
+    use rocket_contrib::json::Json;
 
-    use server;
+    use error::{HandlerErrorKind, HandlerResult};
+    use config::ServerConfig;
+    use super::{FxAAuthenticator};
+
+    struct StubServer {}
+    impl StubServer {
+    pub fn start(rocket: rocket::Rocket) -> HandlerResult<rocket::Rocket> {
+        Ok(rocket
+            .attach(AdHoc::on_attach(|rocket| {
+                // Copy the config into a state manager.
+                let rbconfig = ServerConfig::new(rocket.config());
+                Ok(rocket.manage(rbconfig))
+            }))
+            .mount(
+                "",
+                routes![auth_test_read_stub, auth_test_write_stub],
+            )
+        )}
+    }
+
+    // The following stub function is used for testing only.
+    #[get("/test/<device_id>")]
+    fn auth_test_read_stub(
+        token: HandlerResult<FxAAuthenticator>,
+        device_id: String
+    ) -> HandlerResult<Json> {
+        if token.is_err() {
+            return Err(token.err().unwrap().into());
+        }
+        let scope = token.unwrap().scope;
+        Ok(Json(json!({
+            "status": 200,
+            "scope": scope,
+        })))
+    }
+
+    // The following stub function is used for testing only.
+    #[post("/test/<device_id>")]
+    fn auth_test_write_stub(
+        token: HandlerResult<FxAAuthenticator>,
+        device_id: String
+    ) -> HandlerResult<Json> {
+        if token.is_err() {
+            return Err(token.err().unwrap().into());
+        }
+        let scope = token.unwrap().scope;
+        Ok(Json(json!({
+            "status": 200,
+            "scope": scope,
+        })))
+    }
 
     fn rocket_config(test_data: Table) -> Config {
         let rconfig = RocketConfig::read().expect("failed to read config");
@@ -228,11 +243,8 @@ mod test {
             .get_str("fxa_host")
             .unwrap_or("oauth.stage.mozaws.net");
 
-        let db_url = env::var("ROCKET_DATABASE_URL")
-            .unwrap_or(String::from("mysql://test:test@localhost/pushbox"));
         let config = Config::build(Environment::Development)
             .extra("fxa_host", fxa_host)
-            .extra("database_url", db_url)
             .extra("dryrun", false)
             .extra("test_data", test_data)
             .finalize()
@@ -242,7 +254,7 @@ mod test {
 
     fn rocket_client(config: Config) -> Client {
         let test_rocket =
-            server::Server::start(rocket::custom(config, true)).expect("test rocket failed");
+            StubServer::start(rocket::custom(config, true)).expect("test rocket failed");
         Client::new(test_rocket).expect("test rocket launch failed")
     }
 
@@ -257,97 +269,14 @@ mod test {
 
         test_data.insert("auth_only".to_owned(), true.into());
         let client = rocket_client(rocket_config(test_data));
-        let result = client
-            .post("/v1/store/fxa/test/test")
+        let mut result = client
+            .post("/test/test")
             .header(Header::new("Authorization", "bearer tokentoken"))
             .header(Header::new("Content-Type", "application/json"))
             .body(r#"{"ttl": 123, "data": "Some Data"}"#.to_string())
             .dispatch();
-        assert!(result.status() == rocket::http::Status::raw(200))
-    }
-
-    #[test]
-    fn test_no_write() {
-        let mut test_data = Table::new();
-        let mut fxa_response = Table::new();
-        fxa_response.insert("user".to_owned(), "test".to_owned().into());
-        fxa_response.insert("client_id".to_owned(), "test".to_owned().into());
-        fxa_response.insert(
-            "scope".to_owned(),
-            vec![format!("{}recv", super::FXA_IDENT_ROOT)].into(),
-        );
-        test_data.insert("fxa_response".to_owned(), fxa_response.into());
-        let client = rocket_client(rocket_config(test_data));
-        let result = client
-            .post("/v1/store/fxa/test/test")
-            .header(Header::new("Authorization", "bearer tokentoken"))
-            .header(Header::new("Content-Type", "application/json"))
-            .body(r#"{"ttl": 123, "data": "Some Data"}"#)
-            .dispatch();
-        assert!(result.status() == rocket::http::Status::raw(401))
-    }
-
-    #[test]
-    fn test_write_device() {
-        let mut test_data = Table::new();
-        let mut fxa_response = Table::new();
-        fxa_response.insert("user".to_owned(), "test".to_owned().into());
-        fxa_response.insert("client_id".to_owned(), "test".to_owned().into());
-        fxa_response.insert(
-            "scope".to_owned(),
-            vec![format!("{}send/test", super::FXA_IDENT_ROOT)].into(),
-        );
-        test_data.insert("fxa_response".to_owned(), fxa_response.into());
-        let client = rocket_client(rocket_config(test_data));
-        let result = client
-            .post("/v1/store/fxa/test/test")
-            .header(Header::new("Authorization", "bearer tokentoken"))
-            .header(Header::new("Content-Type", "application/json"))
-            .body(r#"{"ttl": 123, "data": "Some Data"}"#)
-            .dispatch();
-        assert!(result.status() == rocket::http::Status::raw(200))
-    }
-
-    #[test]
-    fn test_no_write_device() {
-        let mut test_data = Table::new();
-        let mut fxa_response = Table::new();
-        fxa_response.insert("user".to_owned(), "test".to_owned().into());
-        fxa_response.insert("client_id".to_owned(), "test".to_owned().into());
-        fxa_response.insert(
-            "scope".to_owned(),
-            vec![format!("{}send/bar", super::FXA_IDENT_ROOT)].into(),
-        );
-        test_data.insert("fxa_response".to_owned(), fxa_response.into());
-        let client = rocket_client(rocket_config(test_data));
-        let result = client
-            .post("/v1/store/fxa/test/boof")
-            .header(Header::new("Authorization", "bearer tokentoken"))
-            .header(Header::new("Content-Type", "application/json"))
-            .body(r#"{"ttl": 123, "data": "Some Data"}"#)
-            .dispatch();
-        assert!(result.status() == rocket::http::Status::raw(401))
-    }
-
-    #[test]
-    fn test_bad_path() {
-        let mut test_data = Table::new();
-        let mut fxa_response = Table::new();
-        fxa_response.insert("user".to_owned(), "test".to_owned().into());
-        fxa_response.insert("client_id".to_owned(), "test".to_owned().into());
-        fxa_response.insert(
-            "scope".to_owned(),
-            vec![format!("{}send/bar", super::FXA_IDENT_ROOT)].into(),
-        );
-        test_data.insert("fxa_response".to_owned(), fxa_response.into());
-        let client = rocket_client(rocket_config(test_data));
-        let result = client
-            .post("/v1/store/fxa/invalid")
-            .header(Header::new("Authorization", "bearer tokentoken"))
-            .header(Header::new("Content-Type", "application/json"))
-            .body(r#"{"ttl": 123, "data": "Some Data"}"#)
-            .dispatch();
-        assert!(result.status() == rocket::http::Status::raw(404))
+        assert!(result.status() == rocket::http::Status::raw(200));
+        println!("### Result: {:?}", result.body_string());
     }
 
     #[test]
@@ -363,7 +292,7 @@ mod test {
         test_data.insert("fxa_response".to_owned(), fxa_response.into());
         let client = rocket_client(rocket_config(test_data));
         let result = client
-            .post("/v1/store/fxa/test/test")
+            .post("/test/test")
             .header(Header::new("Content-Type", "application/json"))
             .body(r#"{"ttl": 123, "data": "Some Data"}"#)
             .dispatch();
@@ -382,7 +311,7 @@ mod test {
         test_data.insert("auth_only".to_owned(), true.into());
         let client = rocket_client(rocket_config(test_data));
         let result = client
-            .post("/v1/store/fxa/test/test")
+            .post("/test/test")
             .header(Header::new("Authorization", "invalid tokentoken"))
             .header(Header::new("Content-Type", "application/json"))
             .body(r#"{"ttl": 123, "data": "Some Data"}"#.to_string())
@@ -402,7 +331,7 @@ mod test {
         test_data.insert("auth_only".to_owned(), true.into());
         let client = rocket_client(rocket_config(test_data));
         let result = client
-            .post("/v1/store/fxa/test/test")
+            .post("/test/test")
             .header(Header::new("Authorization", "invalid"))
             .header(Header::new("Content-Type", "application/json"))
             .body(r#"{"ttl": 123, "data": "Some Data"}"#.to_string())
@@ -421,8 +350,8 @@ mod test {
 
         test_data.insert("auth_only".to_owned(), true.into());
         let client = rocket_client(rocket_config(test_data));
-        let result = client
-            .post("/v1/store/fxa/test/test")
+        let mut result = client
+            .post("/test/test")
             .header(Header::new("Authorization", "bearer"))
             .header(Header::new("Content-Type", "application/json"))
             .body(r#"{"ttl": 123, "data": "Some Data"}"#.to_string())
@@ -442,7 +371,7 @@ mod test {
         test_data.insert("auth_only".to_owned(), true.into());
         let client = rocket_client(rocket_config(test_data));
         let result = client
-            .post("/v1/store/fxa/test/test")
+            .post("/test/test")
             .header(Header::new("Authorization", ""))
             .header(Header::new("Content-Type", "application/json"))
             .body(r#"{"ttl": 123, "data": "Some Data"}"#.to_string())

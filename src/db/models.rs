@@ -161,14 +161,16 @@ impl DatabaseManager {
                     .filter(pushboxv1::service.eq(service.clone()))
                     .filter(pushboxv1::device_id.eq(device_id.clone())),
             ).execute(conn)
-                .context(HandlerErrorKind::DBError)?;
+                .context(HandlerErrorKind::DBError)
+                .unwrap();
         } else {
             diesel::delete(
                 pushboxv1::table
                     .filter(pushboxv1::user_id.eq(user_id.clone()))
                     .filter(pushboxv1::service.eq(service.clone())),
             ).execute(conn)
-                .context(HandlerErrorKind::DBError)?;
+                .context(HandlerErrorKind::DBError)
+                .unwrap();
         }
         Ok(true)
     }

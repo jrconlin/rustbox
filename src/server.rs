@@ -1,14 +1,16 @@
-use auth::FxAAuthenticator;
-use rocket::config::{self, Config, Table};
+use rocket::config;
 use rocket::fairing::AdHoc;
-use rocket::request::{self, FormItems, FromForm, FromRequest};
-use rocket::{self, State};
-use rocket::{Outcome, Request};
+use rocket::http::Method;
+use rocket::http::uri::URI;
+use rocket::request::{FormItems, FromForm};
+use rocket;
 use rocket_contrib::json::Json;
 
+use auth::{FxAAuthenticator, FXA_IDENT_ROOT};
+use config::ServerConfig;
 use db::models::{calc_ttl, DatabaseManager};
 use db::{pool_from_config, Conn};
-use error::HandlerResult;
+use error::{HandlerResult, HandlerError, HandlerErrorKind};
 
 #[derive(Deserialize, Debug)]
 pub struct DataRecord {
@@ -48,49 +50,6 @@ impl<'f> FromForm<'f> for Options {
     }
 }
 
-// Due to some private variables, this must be defined in the same module as rocket.manage()
-#[derive(Debug, Clone)]
-pub struct RustboxConfig {
-    // Authorization Configuration block
-    pub services: Vec<String>,
-    pub fxa_host: String,
-    pub dryrun: bool,
-    pub default_ttl: i64,
-    pub test_data: Table,
-}
-
-// Helper functions to pull values from the private config.
-impl RustboxConfig {
-    pub fn new(config: &Config) -> RustboxConfig {
-        // Transcode rust Config values
-        let svc_list_str =
-            String::from(config.get_str("services").unwrap_or("fxa").replace(" ", ""));
-        let src_list: Vec<String> = svc_list_str.split('.').map(|s| String::from(s)).collect();
-        RustboxConfig {
-            services: src_list,
-            fxa_host: String::from(
-                config
-                    .get_str("fxa_host")
-                    .unwrap_or("oauth.stage.mozaws.net"),
-            ),
-            dryrun: config.get_bool("dryrun").unwrap_or(false),
-            default_ttl: config.get_float("default_ttl").unwrap_or(3600.0) as i64,
-            test_data: config
-                .get_table("test_data")
-                .unwrap_or(&Table::new())
-                .clone(),
-        }
-    }
-}
-
-impl<'a, 'r> FromRequest<'a, 'r> for RustboxConfig {
-    type Error = ();
-
-    fn from_request(req: &'a Request<'r>) -> request::Outcome<Self, ()> {
-        Outcome::Success(req.guard::<State<RustboxConfig>>().unwrap().inner().clone())
-    }
-}
-
 // Encapsulate the server.
 pub struct Server {}
 
@@ -100,7 +59,7 @@ impl Server {
             .attach(AdHoc::on_attach(|rocket| {
                 // Copy the config into a state manager.
                 let pool = pool_from_config(rocket.config()).expect("Could not get pool");
-                let rbconfig = RustboxConfig::new(rocket.config());
+                let rbconfig = ServerConfig::new(rocket.config());
                 Ok(rocket.manage(rbconfig).manage(pool))
             }))
             .mount(
@@ -111,12 +70,47 @@ impl Server {
     }
 }
 
+pub fn check_token(config: &ServerConfig, method: Method, service: &String, device_id: &String, token: &HandlerResult<FxAAuthenticator>) -> Result<bool, HandlerError> {
+    // call unwrap here because we already checked for instances.
+    let scope = match token {
+        Ok(val) => val.scope.clone(),
+        Err(e) => return Err(HandlerErrorKind::Unauthorized(String::from("Token invalid")).into()),
+    };
+    println!("Scopes: {:?}", scope.clone());
+    if config.services.contains(&service) == false {
+        return Err(HandlerErrorKind::NotFound.into());
+    }
+    if scope.contains(&FXA_IDENT_ROOT.to_string()) {
+        return Ok(true);
+    }
+    // Otherwise check for explicit allowances
+    match method {
+        Method::Put | Method::Post | Method::Delete => {
+            if scope.contains(&format!("{}send/{}", FXA_IDENT_ROOT, device_id))
+                || scope.contains(&format!("{}send", FXA_IDENT_ROOT))
+            {
+                return Ok(true);
+            }
+        }
+        Method::Get => {
+            if scope.contains(&format!("{}recv/{}", FXA_IDENT_ROOT, device_id))
+                || scope.contains(&format!("{}recv", FXA_IDENT_ROOT))
+            {
+                return Ok(true);
+            }
+        }
+        _ => {}
+    }
+    return Err(HandlerErrorKind::Unauthorized("Access Token Unauthorized".to_string()).into());
+}
+
 // Method handlers:::
 // Apparently you can't set these on impl methods, must be at top level.
 //  query string parameters for limit and index
 #[get("/<service>/<user_id>/<device_id>?<options>")]
 fn read_opt(
     conn: Conn,
+    config: ServerConfig,
     token: HandlerResult<FxAAuthenticator>,
     service: String,
     user_id: String,
@@ -127,8 +121,10 @@ fn read_opt(
     // Validate::from_request extracts the token from the Authorization header, validates it
     // against FxA and the method, and either returns OK or an error. We need to reraise it to the
     // handler.
-
     if token.is_err() {
+        return Err(token.err().unwrap());
+    }
+    if check_token(&config, Method::Get, &service, &device_id, &token).is_err() {
         return Err(token.err().unwrap());
     }
     let max_index = DatabaseManager::max_index(&conn, &user_id, &device_id, &service);
@@ -153,6 +149,7 @@ fn read_opt(
 #[get("/<service>/<user_id>/<device_id>")]
 fn read(
     conn: Conn,
+    config: ServerConfig,
     token: HandlerResult<FxAAuthenticator>,
     service: String,
     user_id: String,
@@ -163,7 +160,7 @@ fn read(
     // against FxA and the method, and either returns OK or an error. We need to reraise it to the
     // handler.
 
-    if token.is_err() {
+    if check_token(&config, Method::Get, &service, &device_id, &token).is_err() {
         return Err(token.err().unwrap());
     }
     let max_id = DatabaseManager::max_index(&conn, &user_id, &device_id, &service);
@@ -185,14 +182,14 @@ fn read(
 #[post("/<service>/<user_id>/<device_id>", data = "<data>")]
 fn write(
     conn: Conn,
-    config: RustboxConfig,
+    config: ServerConfig,
     token: HandlerResult<FxAAuthenticator>,
     service: String,
     user_id: String,
     device_id: String,
     data: Json<DataRecord>,
 ) -> HandlerResult<Json> {
-    if token.is_err() {
+    if check_token(&config, Method::Post, &service, &device_id, &token).is_err() {
         return Err(token.err().unwrap());
     }
     if config
@@ -231,15 +228,13 @@ fn write(
 #[delete("/<service>/<user_id>/<device_id>")]
 fn delete(
     conn: Conn,
-    _config: RustboxConfig,
+    config: ServerConfig,
     token: HandlerResult<FxAAuthenticator>,
     service: String,
     user_id: String,
     device_id: String,
 ) -> HandlerResult<Json> {
-    if token.is_err() {
-        return Err(token.err().unwrap());
-    }
+    check_token(&config, Method::Delete, &service, &device_id, &token)?;
     let response = DatabaseManager::delete(&conn, &user_id, &device_id, &service);
     if response.is_err() {
         return Err(response.err().unwrap());
@@ -252,12 +247,12 @@ fn delete(
 #[delete("/<service>/<user_id>")]
 fn delete_user(
     conn: Conn,
-    _config: RustboxConfig,
+    config: ServerConfig,
     token: HandlerResult<FxAAuthenticator>,
     service: String,
     user_id: String,
 ) -> HandlerResult<Json> {
-    if token.is_err() {
+    if check_token(&config, Method::Delete, &service, &String::from(""), &token).is_err() {
         return Err(token.err().unwrap());
     }
     let response = DatabaseManager::delete(&conn, &user_id, &String::from(""), &service);
@@ -270,7 +265,7 @@ fn delete_user(
 }
 
 #[get("/status")]
-fn status(config: RustboxConfig) -> HandlerResult<Json> {
+fn status(config: ServerConfig) -> HandlerResult<Json> {
     let config = config;
 
     Ok(Json(json!({

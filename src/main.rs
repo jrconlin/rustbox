@@ -19,6 +19,7 @@ extern crate rocket_contrib;
 extern crate serde;
 
 mod auth;
+mod config;
 mod db;
 mod error;
 mod server;
