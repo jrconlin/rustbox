@@ -12,6 +12,7 @@ use auth::{AuthType, FxAAuthenticator};
 use config::ServerConfig;
 use db::models::DatabaseManager;
 use db::{self, Conn};
+use sqs::{self, SyncEventQueue};
 use error::{HandlerError, HandlerErrorKind, HandlerResult};
 use failure::Error;
 use logging::RBLogger;
@@ -80,6 +81,9 @@ impl Server {
                 // Copy the config into a state manager.
                 let pool = db::pool_from_config(rocket.config()).expect("Could not get pool");
                 let rbconfig = ServerConfig::new(rocket.config());
+                // start SQS listener thread?
+                let sqs_handler = sqs::SyncEventQueue::from_config(rocket.config());
+                let response = sqs_handler.fetch().unwrap();
                 let logger = RBLogger::new(rocket.config());
                 slog_info!(logger.log, "sLogging initialized...");
                 Ok(rocket.manage(rbconfig).manage(pool).manage(logger))

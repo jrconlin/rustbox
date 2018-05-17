@@ -42,7 +42,6 @@ pub enum HandlerErrorKind {
     //NotFound,
     #[fail(display = "A database error occurred")]
     DBError,
-
     // Note: Make sure that if display has an argument, the label includes the argument,
     // otherwise the process macro parser will fail on `derive(Fail)`
     //#[fail(display = "Unexpected rocket error: {:?}", _0)]

@@ -14,11 +14,14 @@ extern crate serde_json;
 #[macro_use]
 extern crate slog;
 
+extern crate futures;
 extern crate mysql;
 extern crate rand;
 extern crate reqwest;
 extern crate rocket;
 extern crate rocket_contrib;
+extern crate rusoto_core;
+extern crate rusoto_sqs;
 extern crate serde;
 extern crate slog_async;
 extern crate slog_json;
@@ -31,6 +34,7 @@ mod db;
 mod error;
 mod logging;
 mod server;
+mod sqs;
 
 fn main() {
     let rocket_serv = server::Server::start(rocket::ignite());
