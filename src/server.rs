@@ -90,7 +90,7 @@ impl Server {
                         db::models::DatabaseManager::delete(
                             &conn, 
                             &event.uid,
-                            &event.id)cd sr
+                            &event.id)
                             .expect("Could not delete record");
                     }
                     None => {},
