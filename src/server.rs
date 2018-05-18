@@ -83,7 +83,18 @@ impl Server {
                 let rbconfig = ServerConfig::new(rocket.config());
                 // start SQS listener thread?
                 let sqs_handler = sqs::SyncEventQueue::from_config(rocket.config());
-                let response = sqs_handler.fetch().unwrap();
+                //TODO put this in handler
+                match sqs_handler.fetch() {
+                    Some(event) => {
+                        let conn = &*pool.get().expect("Could not get connection");
+                        db::models::DatabaseManager::delete(
+                            &conn, 
+                            &event.uid,
+                            &event.id)cd sr
+                            .expect("Could not delete record");
+                    }
+                    None => {},
+                }
                 let logger = RBLogger::new(rocket.config());
                 slog_info!(logger.log, "sLogging initialized...");
                 Ok(rocket.manage(rbconfig).manage(pool).manage(logger))

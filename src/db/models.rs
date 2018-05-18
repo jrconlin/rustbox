@@ -146,20 +146,13 @@ impl DatabaseManager {
         user_id: &String,
         device_id: &String,
     ) -> HandlerResult<bool> {
-        // boxed deletes are "coming soon"
-        // see https://github.com/diesel-rs/diesel/pull/1534
-        if device_id.len() > 0 {
-            diesel::delete(
-                pushboxv1::table
-                    .filter(pushboxv1::user_id.eq(user_id))
-                    .filter(pushboxv1::device_id.eq(device_id)),
-            ).execute(conn)
-                .context(HandlerErrorKind::DBError)?;
-        } else {
-            diesel::delete(pushboxv1::table.filter(pushboxv1::user_id.eq(user_id)))
-                .execute(conn)
-                .context(HandlerErrorKind::DBError)?;
+        let mut query = diesel::delete(pushboxv1::table).into_boxed();
+        query = query.filter(pushboxv1::user_id.eq(user_id));
+        if !device_id.is_empty() {
+            query = query.filter(pushboxv1::device_id.eq(device_id));
         }
+        query.execute(conn)
+            .context(HandlerErrorKind::DBError)?;
         Ok(true)
     }
 }
