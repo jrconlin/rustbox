@@ -151,8 +151,7 @@ impl DatabaseManager {
         if !device_id.is_empty() {
             query = query.filter(pushboxv1::device_id.eq(device_id));
         }
-        query.execute(conn)
-            .context(HandlerErrorKind::DBError)?;
+        query.execute(conn).context(HandlerErrorKind::DBError)?;
         Ok(true)
     }
 }

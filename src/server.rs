@@ -12,10 +12,10 @@ use auth::{AuthType, FxAAuthenticator};
 use config::ServerConfig;
 use db::models::DatabaseManager;
 use db::{self, Conn};
-use sqs::{self, SyncEventQueue};
 use error::{HandlerError, HandlerErrorKind, HandlerResult};
 use failure::Error;
 use logging::RBLogger;
+use sqs::{self, SyncEventQueue};
 
 #[derive(Deserialize, Debug)]
 pub struct DataRecord {
@@ -87,13 +87,10 @@ impl Server {
                 match sqs_handler.fetch() {
                     Some(event) => {
                         let conn = &*pool.get().expect("Could not get connection");
-                        db::models::DatabaseManager::delete(
-                            &conn, 
-                            &event.uid,
-                            &event.id)
+                        db::models::DatabaseManager::delete(&conn, &event.uid, &event.id)
                             .expect("Could not delete record");
                     }
-                    None => {},
+                    None => {}
                 }
                 let logger = RBLogger::new(rocket.config());
                 slog_info!(logger.log, "sLogging initialized...");
